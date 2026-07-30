@@ -6,7 +6,7 @@ import fs from "fs";
 import path from "path";
 
 const HF_MODEL = "BAAI/bge-small-en-v1.5";
-const HF_URL = `https://api-inference.huggingface.co/pipeline/feature-extraction/${HF_MODEL}`;
+const HF_URL = `https://router.huggingface.co/hf-inference/models/${HF_MODEL}/pipeline/feature-extraction`;
 // BGE wants this prefix on the QUERY only (not on stored chunks).
 const BGE_QUERY_PREFIX = "Represent this sentence for searching relevant passages: ";
 
@@ -45,13 +45,19 @@ async function embedQuery(text) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      inputs: [BGE_QUERY_PREFIX + text],
+      inputs: BGE_QUERY_PREFIX + text,   // single string, not an array
       options: { wait_for_model: true },
     }),
   });
   if (!res.ok) throw new Error(`HF ${res.status}: ${(await res.text()).slice(0, 200)}`);
   const data = await res.json();
-  return data[0]; // single vector
+  // Normalize shape: HF may return a flat vector [f,f,...] or nested [[f,f,...]].
+  let vec = data;
+  while (Array.isArray(vec) && Array.isArray(vec[0])) vec = vec[0];
+  if (!Array.isArray(vec) || typeof vec[0] !== "number") {
+    throw new Error(`unexpected embedding shape: ${JSON.stringify(data).slice(0, 120)}`);
+  }
+  return vec;
 }
 
 const SYSTEM_PROMPT = `You are "ktx", a terminal-style assistant on Karthik Rasamsetti's portfolio.
@@ -78,9 +84,12 @@ export default async function handler(req, res) {
     }
 
     const question = String(messages[messages.length - 1].content || "").slice(0, 500);
+    const debug = req.query?.debug === "1" || (req.body && req.body.debug === true);
 
     // 1. retrieve
     let context = "";
+    let retrievalError = null;
+    let topScores = [];
     try {
       const kb = loadKB();
       const qvec = await embedQuery(question);
@@ -88,10 +97,25 @@ export default async function handler(req, res) {
         .map(c => ({ c, score: cosine(qvec, c.embedding) }))
         .sort((a, b) => b.score - a.score)
         .slice(0, TOP_K);
+      topScores = scored.map(s => ({ source: s.c.source, score: +s.score.toFixed(3) }));
       context = scored.map((s, i) => `[${i + 1}] (${s.c.source})\n${s.c.text}`).join("\n\n");
     } catch (e) {
-      // If retrieval fails, still answer — just without grounding.
+      retrievalError = String(e).slice(0, 200);
       context = "(retrieval unavailable)";
+    }
+
+    if (debug) {
+      const kb2 = (() => { try { return loadKB(); } catch { return null; } })();
+      return res.status(200).json({
+        debug: true,
+        question,
+        kb_loaded: !!kb2,
+        kb_count: kb2 ? kb2.count : null,
+        kb_dim: kb2 ? kb2.dim : null,
+        retrievalError,
+        topScores,
+        context_preview: context.slice(0, 300),
+      });
     }
 
     // 2. build messages: system + context, then recent turns
