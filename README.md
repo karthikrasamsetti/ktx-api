@@ -1,34 +1,51 @@
-# ktx-api
+# ktx-api (RAG)
 
-Tiny serverless proxy that lets the `ktx` terminal on karthikrasamsetti.github.io talk to Groq
-without exposing the API key in the browser.
+Serverless RAG backend for the `ktx` terminal on karthikrasamsetti.github.io.
 
-Flow: portfolio (browser) → this function → Groq → back.
+Flow at query time:
+```
+question -> HF embed (BGE) -> cosine search knowledge.json -> top 4 chunks -> Groq -> answer
+```
 
 ## Files
-- `api/chat.js` — the proxy. Holds the system prompt (what ktx knows about Karthik) and calls Groq.
-- `vercel.json` — function config.
+- `ingest.py`    — LOCAL build script. Reads resume + web + READMEs, embeds, writes knowledge.json.
+- `knowledge.json` — the committed index (output of ingest.py). Regenerate when your docs change.
+- `api/chat.js`  — Vercel function: retrieval + Groq.
+- `requirements.txt` — deps for ingest.py.
+- `package.json` — marks the function as ESM.
+- `vercel.json`  — function config.
 
-## Deploy
+## One-time setup
 
-1. Create a **new GitHub repo** called `ktx-api` and push these files.
-2. On [vercel.com](https://vercel.com): **Add New → Project → import `ktx-api`**. Accept defaults, deploy.
-3. In the project: **Settings → Environment Variables**, add:
-   - Name: `GROQ_API_KEY`
-   - Value: your Groq key (from console.groq.com)
-   - Apply to Production, Preview, Development.
-4. **Redeploy** (Deployments → ⋯ → Redeploy) so the env var takes effect.
-5. Your endpoint is now: `https://ktx-api.vercel.app/api/chat` (Vercel shows the exact URL — it may have a suffix).
-
-## Test it
+### 1. Build the index locally
 ```bash
-curl -X POST https://YOUR-DEPLOYMENT.vercel.app/api/chat \
-  -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"what does karthik build?"}]}'
+pip install -r requirements.txt
+mkdir docs                      # put resume.pdf and/or resume.docx in here
+export HF_TOKEN=hf_xxx          # free token from huggingface.co/settings/tokens
+python ingest.py
 ```
-Expect a JSON `{ "reply": "..." }`.
+Edit `README_SOURCES` in ingest.py to add your GitHub README raw URLs first.
+This writes `knowledge.json`.
 
-## Notes
-- Only requests from `karthikrasamsetti.github.io` (and localhost) are allowed via CORS — see `ALLOWED_ORIGINS` in `api/chat.js`.
-- To change what ktx knows, edit `SYSTEM_PROMPT` in `api/chat.js` and redeploy.
-- Model is `llama-3.3-70b-versatile` on Groq's free tier.
+### 2. Commit and deploy
+```bash
+git add knowledge.json api/chat.js package.json requirements.txt ingest.py
+git commit -m "RAG: knowledge index + retrieval"
+git push
+```
+
+### 3. Add env vars in Vercel
+Project -> Settings -> Environment Variables:
+- `GROQ_API_KEY` = your Groq key
+- `HF_TOKEN`     = your Hugging Face read token
+Then Redeploy.
+
+## Test
+```bash
+curl -X POST https://ktx-api.vercel.app/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"what performance testing has Karthik done?"}]}'
+```
+
+## Updating your info
+Re-run `python ingest.py`, commit the new `knowledge.json`, push. No code changes needed.
